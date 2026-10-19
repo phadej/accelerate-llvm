@@ -1,4 +1,5 @@
 {-# LANGUAGE TypeFamilies #-}
+{-# LANGUAGE TemplateHaskellQuotes #-}
 
 -- |
 -- Module      : Data.Array.Accelerate.LLVM.Native.Kernel
@@ -42,6 +43,12 @@ import Control.DeepSeq
 import Foreign.Ptr
 import Prettyprinter
 import Data.String
+import Control.Monad.IO.Class (liftIO)
+
+import Data.Array.Accelerate.LLVM.Native.Target (Native)
+
+import qualified Language.Haskell.TH as TH
+import qualified Language.Haskell.TH.Syntax as TH
 
 data NativeKernel env where
   NativeKernel
@@ -85,9 +92,43 @@ instance IsKernel NativeKernel where
       fullName = name ++ "-" ++ show uid
       uid = hashOperation cluster args
 
+  thCompileKernel env cluster args = TH.joinCode $ do
+      (sz, obj) <- liftIO $ evalLLVM defaultTarget $ do
+            (sz, module') <- codegen fullName env cluster args
+            obj <- compile uid (fromString $ fullName) module'
+            return (sz, obj)
+      return
+          [|| NativeKernel
+                $$(embedForTarget defaultTarget obj)
+                $$(TH.liftTyped (fromString fullName))
+                $$(TH.liftTyped uid)
+                $$(TH.liftTyped sz)
+                $$(TH.liftTyped detail)
+                $$(TH.liftTyped brief)
+           ||]
+    where
+      (name, detail, brief) = generateKernelNameAndDescription operationName cluster
+      fullName = name ++ "-" ++ show uid
+      uid = hashOperation cluster args
+
   kernelMetadata kernel = NativeKernelMetadata $ sizeOfEnv kernel
 
   encodeKernel = Left . kernelUID
+
+-- acts as 'link'
+class Embed arch where
+
+  -- | Turn the compiled object into a TemplateHaskell expression, suitable for
+  -- use in a splice. The splice should evaluate into the backend-specific
+  -- executable representation.
+  --
+  embedForTarget
+      :: arch
+      -> ObjectR f
+      -> TH.CodeQ (Lifetime (FunPtr f))
+
+instance Embed Native where
+    embedForTarget = error "implement me"
 
 instance PrettyKernel NativeKernel where
   prettyKernel = PrettyKernelFun go
